@@ -4,6 +4,10 @@
 
 # Backend Engineering Take-Home Assignment: Dynamic Pricing Proxy
 
+> 📄 **My solution write-up — design, trade-offs, and how to run/test — is in [SOLUTION.md](./SOLUTION.md).**
+>
+> 🤖 **AI assistance:** this solution was developed with AI assistance. Full disclosure of which parts and the workflow is in [SOLUTION.md](./SOLUTION.md#use-of-ai-assistance).
+
 Welcome to the Tripla backend engineering take-home assignment\! 🧑‍💻 This exercise is designed to simulate a real-world problem you might encounter as part of our team.
 
 ⚠️ **Before you begin**, please review the main [FAQ](/README.md#frequently-asked-questions). It contains important information, **including our specific guidelines on how to submit your solution.**

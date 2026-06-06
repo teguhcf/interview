@@ -1,8 +1,11 @@
 services:
+  redis:
+    image: redis:7-alpine
+
   rate-api:
     image: tripladev/rate-api
     ports:
-      - "8080:8080"
+      - "8081:8080"
 
   interview-dev:
     build: .
@@ -12,5 +15,7 @@ services:
       - .:/rails
     environment:
       - RATE_API_URL=http://rate-api:8080
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       - rate-api
+      - redis

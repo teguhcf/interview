@@ -1,5 +1,26 @@
 module Api::V1
   class PricingService < BaseService
+    # A fetched rate is valid for 5 minutes, so we cache for the same window.
+    CACHE_TTL = 5.minutes
+
+    # When a key expires under concurrent load, let the first caller refresh it
+    # while others briefly serve the stale value. This prevents a "cache
+    # stampede" where every in-flight request hits the upstream at once and
+    # burns through the daily API budget.
+    RACE_CONDITION_TTL = 5.seconds
+
+    # Low-level failures HTTParty/Net::HTTP raise when the upstream is slow,
+    # unreachable, refuses the connection, or cannot be resolved. We translate
+    # all of them into a single user-facing error rather than leaking a 500.
+    NETWORK_ERRORS = [
+      Net::OpenTimeout,
+      Net::ReadTimeout,
+      Errno::ECONNREFUSED,
+      Errno::ECONNRESET,
+      Errno::EHOSTUNREACH,
+      SocketError
+    ].freeze
+
     def initialize(period:, hotel:, room:)
       @period = period
       @hotel = hotel
@@ -7,14 +28,81 @@ module Api::V1
     end
 
     def run
-      # TODO: Start to implement here
-      rate = RateApiClient.get_rate(period: @period, hotel: @hotel, room: @room)
-      if rate.success?
-        parsed_rate = JSON.parse(rate.body)
-        @result = parsed_rate['rates'].detect { |r| r['period'] == @period && r['hotel'] == @hotel && r['room'] == @room }&.dig('rate')
-      else
-        errors << rate.body['error']
+      @result = Rails.cache.fetch(cache_key, expires_in: CACHE_TTL, race_condition_ttl: RACE_CONDITION_TTL) do
+        log(:info, "pricing.cache_miss")
+        fetch_from_api
       end
+    rescue RateApiError => e
+      errors << e.message
+    end
+
+    private
+
+    def cache_key
+      "rate/#{@period}/#{@hotel}/#{@room}"
+    end
+
+    def fetch_from_api
+      response = RateApiClient.get_rate(period: @period, hotel: @hotel, room: @room)
+      handle_response(response)
+    rescue *NETWORK_ERRORS => e
+      log(:error, "pricing.upstream_unreachable", error: e.class)
+      raise RateApiError, "Pricing service is unavailable. Please try again later."
+    end
+
+    def handle_response(response)
+      return extract_rate(response) if response.success?
+
+      if response.code == 429
+        log(:warn, "pricing.rate_limited")
+        raise RateApiError, "Pricing service is currently rate limited. Please try again later."
+      else
+        log(:error, "pricing.upstream_error", status: response.code)
+        raise RateApiError, "Pricing service returned an error (HTTP #{response.code})"
+      end
+    end
+
+    def extract_rate(response)
+      parsed = JSON.parse(response.body)
+      entry = parsed["rates"]&.detect { |r|
+        r["period"] == @period && r["hotel"] == @hotel && r["room"] == @room
+      }
+
+      if entry.nil? || !entry.key?("rate")
+        log(:error, "pricing.rate_not_found")
+        raise RateApiError, "Rate not found for the given parameters."
+      end
+
+      rate = normalize_rate(entry["rate"])
+      if rate.nil?
+        log(:error, "pricing.invalid_rate", value: entry["rate"].inspect)
+        raise RateApiError, "Pricing service returned an invalid response."
+      end
+
+      log(:info, "pricing.fetched", rate: rate)
+      rate
+    rescue JSON::ParserError => e
+      log(:error, "pricing.invalid_response", error: e.class)
+      raise RateApiError, "Pricing service returned an invalid response."
+    end
+
+    # The upstream returns the rate inconsistently as either an integer (44900)
+    # or a numeric string ("64000"). Rates are whole-number prices across every
+    # combination we observed, so we normalize to Integer to give our own
+    # clients a stable response contract. Returns nil for anything non-numeric.
+    def normalize_rate(raw)
+      case raw
+      when Integer then raw
+      when Numeric then raw.to_i
+      when String then Integer(raw, exception: false)
+      end
+    end
+
+    # Emits a single structured (key=value) log line so cache misses, upstream
+    # failures, and successful fetches are all greppable in production.
+    def log(level, event, **fields)
+      payload = { event: event, period: @period, hotel: @hotel, room: @room }.merge(fields)
+      Rails.logger.public_send(level, payload.map { |k, v| "#{k}=#{v}" }.join(" "))
     end
   end
 end
