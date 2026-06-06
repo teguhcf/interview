@@ -28,16 +28,38 @@ module Api::V1
     end
 
     def run
-      @result = Rails.cache.fetch(cache_key, expires_in: CACHE_TTL, race_condition_ttl: RACE_CONDITION_TTL) do
-        log(:info, "pricing.cache_miss")
-        fetch_from_api
-      end
+      @result = read_through_cache
     rescue RateApiError => e
       errors << e.message
     end
 
     private
 
+    # Read-through cache with singleflight protection.
+    #
+    # The fast path returns a warm hit without taking any lock, so steady-state
+    # reads for a key never serialize. On a cold/expired miss, SingleFlight
+    # collapses concurrent callers for this key: only the first runs the fetch
+    # while the rest block, then fall through to a cache hit (double-checked
+    # locking) instead of each firing its own upstream request. This guards the
+    # daily API budget against a thundering herd when a key is cold -- e.g. the
+    # first request, post-deploy, or after a Redis eviction -- the case
+    # race_condition_ttl (which needs an existing expired value to serve as
+    # stale) does not cover.
+    def read_through_cache
+      cached = Rails.cache.read(cache_key)
+      return cached unless cached.nil?
+
+      SingleFlight.run(cache_key) do
+        Rails.cache.fetch(cache_key, expires_in: CACHE_TTL, race_condition_ttl: RACE_CONDITION_TTL) do
+          log(:info, "pricing.cache_miss")
+          fetch_from_api
+        end
+      end
+    end
+
+    # Safe to interpolate raw params: the controller allowlists period/hotel/room
+    # before the service runs, so these are always one of a fixed 36 combinations.
     def cache_key
       "rate/#{@period}/#{@hotel}/#{@room}"
     end

@@ -31,6 +31,45 @@ GET /api/v1/pricing                 Api::V1::PricingController
   response normalization, structured logging.
 - `lib/rate_api_client.rb` — thin HTTParty client with a 10s timeout.
 - `lib/rate_api_error.rb` — single error type for every upstream failure mode.
+- `lib/single_flight.rb` — per-process request coalescing for cold-cache misses
+  (see [Cache stampede](#cache-stampede)).
+
+## API: request and responses
+
+A single endpoint: `GET /api/v1/pricing` with required query params `period`,
+`hotel`, and `room`.
+
+```bash
+curl 'http://localhost:3000/api/v1/pricing?period=Summer&hotel=FloatingPointResort&room=SingletonRoom'
+```
+
+| Scenario | Status | Body |
+|---|---|---|
+| Success | `200` | `{"rate": 44900}` |
+| Missing param | `400` | `{"error": "Missing required parameters: period, hotel, room"}` |
+| Invalid value | `400` | `{"error": "Invalid period. Must be one of: Summer, Autumn, Winter, Spring"}` |
+| Upstream failure | `503` | `{"error": "Pricing service is unavailable. Please try again later."}` |
+
+Valid values (allowlisted in the controller, 4 × 3 × 3 = 36 combinations):
+
+| Param | Allowed values |
+|---|---|
+| `period` | `Summer`, `Autumn`, `Winter`, `Spring` |
+| `hotel` | `FloatingPointResort`, `GitawayHotel`, `RecursionRetreat` |
+| `room` | `SingletonRoom`, `BooleanTwin`, `RestfulKing` |
+
+## Configuration
+
+All configuration is via environment variables (wired up in `docker-compose.yml`):
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `RATE_API_URL` | Base URL of the upstream pricing model | `http://localhost:8080` |
+| `RATE_API_TOKEN` | Auth token sent as the `token` header | **none — required**, boots loudly if unset |
+| `REDIS_URL` | Cache store connection | `redis://localhost:6379/0` |
+
+`RATE_API_TOKEN` is intentionally given no default: a misconfigured deployment
+fails fast at boot rather than silently sending unauthenticated requests.
 
 ## Why this meets the 10,000 req/day constraint
 
@@ -95,10 +134,32 @@ Probing the model directly surfaced two behaviours worth handling defensively:
 
 ## Cache stampede
 
-When a key expires under concurrent load, every in-flight request would miss at
-once and hit the model simultaneously, wasting the daily budget. `Rails.cache.fetch`
-is configured with `race_condition_ttl: 5.seconds` so the first caller refreshes
-the key while others briefly serve the slightly-stale value.
+Under concurrent load, many requests for the same key can miss at once and hit
+the model simultaneously, wasting the daily budget. There are two distinct
+flavours, and they need different defences:
+
+1. **Warm-expiry stampede** — a populated key *expires* while requests are in
+   flight. `Rails.cache.fetch` is configured with `race_condition_ttl: 5.seconds`,
+   so the first caller refreshes the key while others briefly serve the
+   slightly-stale value from Redis (shared across all workers and hosts).
+2. **Cold-start stampede** — a key has *no value at all* (first-ever request,
+   post-deploy, after a Redis eviction/restart). `race_condition_ttl` cannot help
+   here: it needs an existing expired value to serve as stale. Without protection,
+   N simultaneous cold misses become N upstream calls.
+
+The cold case is handled with **singleflight** (`lib/single_flight.rb`): a
+read-through lookup first reads the cache without any lock (so warm hits never
+serialize), and only on a miss takes a per-key lock. The first caller fetches and
+populates the cache; the others block, then fall through to a cache hit
+(double-checked locking) instead of each firing their own request. A burst of
+concurrent cold requests for one key collapses to a single upstream call — proven
+by the `collapses concurrent cold-cache requests` test, which records 1 call for
+50 simultaneous requests (≈50 without the lock).
+
+The lock is **in-process**. Under multi-process Puma this collapses a stampede
+within each worker (N misses → one call *per worker*). Collapsing across workers
+or hosts would need a distributed lock (Redis `SET NX` + waiters polling the
+cache); that is deliberately left out — see the trade-offs below.
 
 ## Observability
 
@@ -110,9 +171,12 @@ mode are greppable in production.
 
 ## Trade-offs and things intentionally left out
 
-- **No request coalescing / distributed lock.** `race_condition_ttl` covers the
-  common case; a full single-flight lock adds complexity not justified at 36 keys
-  and 6 req/min.
+- **No *distributed* singleflight.** In-process singleflight is implemented (above);
+  a cross-process Redis lock would be needed to collapse a stampede across all Puma
+  workers/hosts to a single call. It adds real complexity (lock TTL, waiter timeouts,
+  poll/pub-sub, graceful degradation when Redis is down) that isn't justified at 36
+  keys and ~7 req/min, where the per-worker collapse already removes the herd. The
+  hook is in place if the load profile ever demands it.
 - **No serve-stale-on-error.** We could return an expired rate when the model is
   down, but that risks serving a rate older than the 5-minute contract, so we
   return `503` instead. This is a deliberate correctness-over-availability choice.
@@ -139,7 +203,16 @@ docker compose exec interview-dev ./bin/rails test test/controllers/pricing_cont
 
 The test suite stubs `RateApiClient` (no network) and swaps a `MemoryStore` in
 for cache-behaviour tests, asserting hit/miss/expiry by counting upstream calls
-and covering every failure branch above.
+and covering every failure branch above. It is split by layer:
+
+- `test/services/api/v1/pricing_service_test.rb` — **unit** tests for the
+  business logic (caching, normalization, error translation, singleflight),
+  asserted directly against the `result` / `valid?` / `errors` contract.
+- `test/controllers/pricing_controller_test.rb` — **integration** tests for the
+  HTTP contract (parameter validation, status-code mapping, JSON shape).
+
+The singleflight test spins up 50 threads against one cold key and asserts
+exactly one upstream call (≈50 without the lock).
 
 > **Local port note:** `docker-compose.yml` maps the pricing model to host `8081`
 > (not `8080`) and does not publish Redis, to avoid collisions with other local
