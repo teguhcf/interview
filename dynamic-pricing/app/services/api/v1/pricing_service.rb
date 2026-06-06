@@ -21,6 +21,10 @@ module Api::V1
       SocketError
     ].freeze
 
+    # HTTP 429 from the upstream means we've hit the per-token rate limit; we
+    # surface a distinct "rate limited" message rather than a generic error.
+    RATE_LIMITED_STATUS = 429
+
     def initialize(period:, hotel:, room:)
       @period = period
       @hotel = hotel
@@ -69,43 +73,45 @@ module Api::V1
       handle_response(response)
     rescue *NETWORK_ERRORS => e
       log(:error, "pricing.upstream_unreachable", error: e.class)
-      raise RateApiError, "Pricing service is unavailable. Please try again later."
+      raise RateApiError, PricingErrors::UNAVAILABLE
     end
 
     def handle_response(response)
       return extract_rate(response) if response.success?
 
-      if response.code == 429
+      if response.code == RATE_LIMITED_STATUS
         log(:warn, "pricing.rate_limited")
-        raise RateApiError, "Pricing service is currently rate limited. Please try again later."
+        raise RateApiError, PricingErrors::RATE_LIMITED
       else
         log(:error, "pricing.upstream_error", status: response.code)
-        raise RateApiError, "Pricing service returned an error (HTTP #{response.code})"
+        raise RateApiError, format(PricingErrors::UPSTREAM_ERROR, status: response.code)
       end
     end
 
     def extract_rate(response)
       parsed = JSON.parse(response.body)
-      entry = parsed["rates"]&.detect { |r|
-        r["period"] == @period && r["hotel"] == @hotel && r["room"] == @room
+      entry = parsed[RateApiKeys::RATES]&.detect { |r|
+        r[RateApiKeys::PERIOD] == @period &&
+          r[RateApiKeys::HOTEL] == @hotel &&
+          r[RateApiKeys::ROOM] == @room
       }
 
-      if entry.nil? || !entry.key?("rate")
+      if entry.nil? || !entry.key?(RateApiKeys::RATE)
         log(:error, "pricing.rate_not_found")
-        raise RateApiError, "Rate not found for the given parameters."
+        raise RateApiError, PricingErrors::RATE_NOT_FOUND
       end
 
-      rate = normalize_rate(entry["rate"])
+      rate = normalize_rate(entry[RateApiKeys::RATE])
       if rate.nil?
-        log(:error, "pricing.invalid_rate", value: entry["rate"].inspect)
-        raise RateApiError, "Pricing service returned an invalid response."
+        log(:error, "pricing.invalid_rate", value: entry[RateApiKeys::RATE].inspect)
+        raise RateApiError, PricingErrors::INVALID_RESPONSE
       end
 
       log(:info, "pricing.fetched", rate: rate)
       rate
     rescue JSON::ParserError => e
       log(:error, "pricing.invalid_response", error: e.class)
-      raise RateApiError, "Pricing service returned an invalid response."
+      raise RateApiError, PricingErrors::INVALID_RESPONSE
     end
 
     # The upstream returns the rate inconsistently as either an integer (44900)

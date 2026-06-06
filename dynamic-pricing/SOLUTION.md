@@ -214,9 +214,9 @@ and covering every failure branch above. It is split by layer:
 The singleflight test spins up 50 threads against one cold key and asserts
 exactly one upstream call (≈50 without the lock).
 
-> **Local port note:** `docker-compose.yml` maps the pricing model to host `8081`
-> (not `8080`) and does not publish Redis, to avoid collisions with other local
-> containers. Inter-container traffic uses the Docker network unchanged.
+> **Local port note:** `docker-compose.yml` exposes the pricing model on host
+> `8080` and does not publish Redis (only the app needs it, over the Docker
+> network). Inter-container traffic uses the Docker network unchanged.
 
 ## Use of AI assistance
 

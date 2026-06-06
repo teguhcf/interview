@@ -5,7 +5,7 @@ services:
   rate-api:
     image: tripladev/rate-api
     ports:
-      - "8081:8080"
+      - "8080:8080"
 
   interview-dev:
     build: .
