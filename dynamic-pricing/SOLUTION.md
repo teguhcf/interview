@@ -38,7 +38,7 @@ GET /api/v1/pricing                 Api::V1::PricingController
   allowlists; maps upstream failures to **503**, bad input to **400**.
 - `app/services/api/v1/pricing_service.rb` — caching, upstream-error translation,
   response normalization, structured logging.
-- `lib/rate_api_client.rb` — thin HTTParty client with a 10s timeout.
+- `lib/rate_api_client.rb` — thin HTTParty client with a 3s timeout.
 - `lib/rate_api_error.rb` — single error type for every upstream failure mode.
 - `lib/single_flight.rb` — per-process request coalescing for cold-cache misses
   (see [Cache stampede](#cache-stampede)).
@@ -119,7 +119,7 @@ descriptive message — never a leaked stack trace.
 | Model returns HTTP 429 | `503` "currently rate limited" |
 | Model returns other non-2xx | `503` "returned an error (HTTP n)" |
 | Model unreachable (DNS, connection refused, reset) | `503` "service is unavailable" |
-| Model times out (>10s) | `503` "service is unavailable" |
+| Model times out (>3s) | `503` "service is unavailable" |
 | Malformed / non-JSON body | `503` "returned an invalid response" |
 | `rates` array missing the requested entry | `503` "Rate not found" |
 | Failed fetches | **never cached** — the block raises before returning |
@@ -148,7 +148,7 @@ the model simultaneously, wasting the daily budget. There are two distinct
 flavours, and they need different defences:
 
 1. **Warm-expiry stampede** — a populated key *expires* while requests are in
-   flight. `Rails.cache.fetch` is configured with `race_condition_ttl: 5.seconds`,
+   flight. `Rails.cache.fetch` is configured with `race_condition_ttl: 2.seconds`,
    so the first caller refreshes the key while others briefly serve the
    slightly-stale value from Redis (shared across all workers and hosts).
 2. **Cold-start stampede** — a key has *no value at all* (first-ever request,
