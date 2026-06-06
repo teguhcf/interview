@@ -7,7 +7,7 @@ module Api::V1
     # while others briefly serve the stale value. This prevents a "cache
     # stampede" where every in-flight request hits the upstream at once and
     # burns through the daily API budget.
-    RACE_CONDITION_TTL = 2.seconds
+    RACE_CONDITION_TTL = 3.seconds
 
     # Low-level failures HTTParty/Net::HTTP raise when the upstream is slow,
     # unreachable, refuses the connection, or cannot be resolved. We translate

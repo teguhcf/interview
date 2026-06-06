@@ -148,7 +148,7 @@ the model simultaneously, wasting the daily budget. There are two distinct
 flavours, and they need different defences:
 
 1. **Warm-expiry stampede** — a populated key *expires* while requests are in
-   flight. `Rails.cache.fetch` is configured with `race_condition_ttl: 2.seconds`,
+   flight. `Rails.cache.fetch` is configured with `race_condition_ttl: 3.seconds`,
    so the first caller refreshes the key while others briefly serve the
    slightly-stale value from Redis (shared across all workers and hosts).
 2. **Cold-start stampede** — a key has *no value at all* (first-ever request,
