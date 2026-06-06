@@ -17,12 +17,21 @@ rate's validity window (5 minutes). The first request for a key fetches from the
 model and caches the result; every subsequent request in that 5-minute window is
 served from cache without touching the model.
 
+To stop a burst of simultaneous requests for the *same uncached* key from all
+calling the model at once (a cache stampede), the miss path is guarded by a
+per-process **singleflight** lock: only the first caller fetches while the rest
+wait and then read the value it cached. Warm hits skip the lock entirely (a
+lock-free read first), so steady-state reads never serialize. Details and the
+warm-expiry vs. cold-start distinction are in [Cache stampede](#cache-stampede).
+
 ```
 GET /api/v1/pricing                 Api::V1::PricingController
   ?period&hotel&room        ──▶     ├─ validate_params  → 400 on bad/missing input
-                                    └─ PricingService#run
-                                         └─ Rails.cache.fetch(key, ttl: 5.min)
-                                              └─ RateApiClient → POST pricing-model
+                                    └─ PricingService#run → read_through_cache
+                                         ├─ cache hit  → return value (no lock)
+                                         └─ miss → SingleFlight.run(key)        ← coalesces
+                                                     └─ Rails.cache.fetch(key, ttl: 5.min)
+                                                          └─ RateApiClient → POST pricing-model
 ```
 
 - `app/controllers/api/v1/pricing_controller.rb` — validates input against
