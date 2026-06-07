@@ -1,0 +1,1 @@
+class RateApiError < StandardError; end

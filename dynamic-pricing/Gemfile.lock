@@ -199,6 +199,10 @@ GEM
     rdoc (6.14.2)
       erb
       psych (>= 4.0.0)
+    redis (5.4.1)
+      redis-client (>= 0.22.0)
+    redis-client (0.29.0)
+      connection_pool
     reline (0.6.2)
       io-console (~> 0.5)
     securerandom (0.4.1)
@@ -228,6 +232,7 @@ DEPENDENCIES
   listen (~> 3.3)
   puma (>= 5.0)
   rails (~> 7.1.5, >= 7.1.5.2)
+  redis (>= 4.0.1)
   sqlite3 (>= 1.4)
   tzinfo-data
 
